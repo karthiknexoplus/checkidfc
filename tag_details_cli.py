@@ -3,9 +3,43 @@ import requests
 from lxml import etree
 import xmlsec
 import json
+import os
 
-IDFC_API_URL = "https://etolluatapi.idfcfirstbank.com/dimtspay_toll_services/toll/ReqTagDetails/v2"
-CERT_FILE = "etolluatsigner_Public.crt.txt"
+API_URL = "https://fastag.onebee.in/api/bank/tag_details"
+PRIVATE_KEY_FILE = "signer_private_key.pem"
+PUBLIC_CERT_FILE = "signer_public_cert.pem"
+
+
+def sign_xml(xml_path, signed_xml_path):
+    # Parse the XML
+    xml = etree.parse(xml_path)
+    root = xml.getroot()
+
+    # Create signature template
+    signature_node = xmlsec.template.create(
+        root,
+        xmlsec.Transform.EXCL_C14N,
+        xmlsec.Transform.RSA_SHA256
+    )
+    root.insert(0, signature_node)
+
+    # Add reference
+    ref = xmlsec.template.add_reference(signature_node, xmlsec.Transform.SHA256)
+    xmlsec.template.add_transform(ref, xmlsec.Transform.ENVELOPED)
+
+    # Add KeyInfo and X509Data
+    key_info = xmlsec.template.ensure_key_info(signature_node)
+    xmlsec.template.add_x509_data(key_info)
+
+    # Sign
+    sign_ctx = xmlsec.SignatureContext()
+    sign_ctx.key = xmlsec.Key.from_file(PRIVATE_KEY_FILE, xmlsec.KeyFormat.PEM)
+    sign_ctx.key.load_cert_from_file(PUBLIC_CERT_FILE, xmlsec.KeyFormat.PEM)
+    sign_ctx.sign(signature_node)
+
+    # Save signed XML
+    with open(signed_xml_path, "wb") as f:
+        f.write(etree.tostring(xml, pretty_print=True))
 
 
 def main():
@@ -14,54 +48,29 @@ def main():
         sys.exit(1)
 
     xml_file = sys.argv[1]
-    with open(xml_file, 'rb') as f:
-        xml_data = f.read()
+    signed_xml_file = "signed_request.xml"
 
-    # Send request
-    headers = {"Content-Type": "application/xml"}
-    response = requests.post(IDFC_API_URL, data=xml_data, headers=headers)
-    if response.status_code != 200:
-        print(f"Error: Received status code {response.status_code} from IDFC API")
+    # Check for private key and cert
+    if not os.path.exists(PRIVATE_KEY_FILE) or not os.path.exists(PUBLIC_CERT_FILE):
+        print(f"Error: Private key or public cert not found. Expected '{PRIVATE_KEY_FILE}' and '{PUBLIC_CERT_FILE}' in current directory.")
+        sys.exit(1)
+
+    # Sign the XML
+    try:
+        sign_xml(xml_file, signed_xml_file)
+        print(f"Signed XML saved to {signed_xml_file}")
+    except Exception as e:
+        print(f"Error signing XML: {e}")
         sys.exit(2)
 
-    # Parse response
-    try:
-        root = etree.fromstring(response.content)
-    except Exception as e:
-        print(f"Error: Invalid XML from IDFC API: {e}")
-        sys.exit(3)
+    # Send signed XML
+    with open(signed_xml_file, 'rb') as f:
+        signed_xml = f.read()
 
-    # Find the Signature node
-    signature_node = root.find('.//{http://www.w3.org/2000/09/xmldsig#}Signature')
-    if signature_node is None:
-        print("Error: No Signature found in response")
-        sys.exit(4)
-
-    # Verify the signature
-    try:
-        manager = xmlsec.KeysManager()
-        key = xmlsec.Key.from_file(CERT_FILE, xmlsec.KeyFormat.CERT_PEM)
-        manager.add_key(key)
-        ctx = xmlsec.SignatureContext(manager)
-        ctx.verify(signature_node)
-    except Exception as e:
-        print(f"Error: Signature verification failed: {e}")
-        sys.exit(5)
-
-    # Extract vehicle details
-    vehicle_details = {}
-    details_nodes = root.findall('.//Detail')
-    for detail in details_nodes:
-        name = detail.attrib.get('name')
-        value = detail.attrib.get('value')
-        if name and value:
-            vehicle_details[name] = value
-
-    if vehicle_details:
-        print(json.dumps(vehicle_details, indent=2))
-    else:
-        print("No vehicle details found. Full response:")
-        print(response.content.decode(errors='replace'))
+    headers = {"Content-Type": "application/xml"}
+    response = requests.post(API_URL, data=signed_xml, headers=headers)
+    print(f"Response status: {response.status_code}")
+    print(response.text)
 
 if __name__ == "__main__":
     main() 
